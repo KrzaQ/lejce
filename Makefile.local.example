@@ -1,0 +1,4 @@
+# Copy to Makefile.local (git ignores it) and set your own values.
+
+# The git remotes that `make push` pushes main to.
+REMOTES = origin
