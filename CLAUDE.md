@@ -21,7 +21,8 @@ Expect the author's messages to come from dictation, with words misheard.
   settings, paths or user-facing text.
 - Commits:
   - subject in imperative mood, under about 70 characters, with a module
-    prefix: `host:`, `claude:`, `pi:`, `codex:`, `build:`, `docs:`;
+    prefix: `host:`, `run:`, `activity:`, `mcp:`, `claude:`, `pi:`,
+    `codex:`, `examples:`, `build:`, `docs:`;
   - the body explains why;
   - one commit per module or concern;
   - no AI attribution in commits (no `Co-Authored-By`, no tool names).

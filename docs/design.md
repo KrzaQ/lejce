@@ -45,6 +45,12 @@ files and its own settings there (`CLAUDE.md`, memory, hooks).
 - Lejce names the engine session explicitly (`--session-id`, `--resume`).
   It never uses `--continue`: that takes the latest conversation in the
   folder, which may belong to another program or to a terminal session.
+- When the engine no longer has the session, the message ends with
+  `Error::SessionGone`, and the program sends the history in a new one.
+  Claude Code reports a missing session; pi creates it empty, so Lejce
+  first asks pi how many messages the session has (`get_state`).
+- `run()` is one message on a new conversation without a session. Kuterlapa
+  uses it.
 
 ## MCP servers
 
@@ -52,12 +58,19 @@ The program gives a list of MCP servers. Each engine takes them its own way:
 
 - Claude Code: `--mcp-config` (stdio or HTTP servers);
 - Codex: `-c mcp_servers.<name>...`;
-- pi: no MCP support of its own, so an extension bridges the servers (as
-  Kuterlapa's `pi-tools.ts` does now).
+- pi: no MCP support of its own, so an extension (`src/pi-mcp.ts`) reads
+  the servers from an environment variable and registers them.
 
-A server on this machine and an engine on another machine meet through SSH:
-`ssh -R` forwards a port (or a Unix socket) of the remote machine to the
-local server. HTTP servers need nothing else on the remote side.
+A server on this machine and an engine on another machine meet through SSH.
+The program marks such an HTTP server `forward`. Lejce picks a random port
+from 20000 to 59999 on the remote machine, adds `ssh -R <port>:<host>:<port>`
+with `ExitOnForwardFailure`, and points the engine's configuration at
+`127.0.0.1:<port>`. A taken port stops ssh, so the engine never starts
+without its tools. A stdio server runs where the engine runs, so over SSH
+its command must exist on the remote machine.
+
+Over SSH, pi's extension goes to `~/.cache/lejce/` on the remote machine,
+and the server list goes through `env` on the remote command line.
 
 ## Questions from the engine
 
@@ -76,10 +89,10 @@ so that tools the engine started stop too.
 
 ## Steps
 
-1. Move the code from Kuterlapa: process start and cancel, the stream
-   parsers, usage, the pi dialogs. Kuterlapa then depends on Lejce.
-2. Long-lived conversations and explicit session ids (Lemat needs them;
-   Kuterlapa sends one message per process now).
-3. SSH hosts with forwarded MCP servers.
+1. Done: move the code from Kuterlapa: process start and cancel, the
+   stream parsers, usage, the pi dialogs. Kuterlapa depends on Lejce.
+2. Done: long-lived conversations and explicit session ids (Lemat needs
+   them; Kuterlapa sends one message per process).
+3. Done: SSH hosts with forwarded MCP servers.
 4. Permission prompts for Claude Code through an MCP tool.
 5. Codex.

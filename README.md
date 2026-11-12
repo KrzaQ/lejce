@@ -19,6 +19,15 @@ make test
 
 `make help` lists all targets.
 
+To try a conversation by hand, one message per line:
+
+```sh
+cargo run --example talk -- claude sonnet --new
+```
+
+The example's header lists its options: a remote host, a session to
+resume, HTTP MCP servers.
+
 ## License
 
 MIT or Apache 2.0, at your choice.
