@@ -4,8 +4,9 @@
 //! cancelling stops the tools it started too.
 
 use crate::activity::Activity;
+use crate::mcp::{self, McpServer};
 use crate::question::{Answer, Question};
-use crate::{claude, pi, Engine, Host};
+use crate::{claude, pi, Engine, Forward, Host};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Lines, Read};
 use std::os::unix::process::CommandExt;
@@ -15,18 +16,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{error, fmt};
-
-/// An MCP server that the engine starts for a conversation (stdio).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpServer {
-    /// The name the engine knows the server by. Its tools are
-    /// `mcp__<name>__<tool>`.
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    /// What the tools are for, for engines that show it to the model (pi).
-    pub description: Option<String>,
-}
 
 /// The tools of a conversation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -85,6 +74,8 @@ pub struct Outcome {
 
 #[derive(Debug)]
 pub enum Error {
+    /// The setup cannot work: a server that cannot be forwarded, say.
+    Setup(String),
     /// Starting the engine, or talking to it, failed.
     Io { doing: String, error: io::Error },
     /// The program cancelled the conversation.
@@ -101,6 +92,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Error::Setup(message) => f.write_str(message),
             Error::Io { doing, error } => write!(f, "{doing}: {error}"),
             Error::Cancelled => write!(f, "cancelled"),
             Error::SessionGone => write!(f, "the engine no longer has this session"),
@@ -267,16 +259,33 @@ pub struct Conversation {
 /// At most this much of the engine's error output is kept: the latest.
 const ERRORS: usize = 16 * 1024;
 
+/// The setup as the engine's machine sees it, and the ports to forward
+/// there. On this machine it stays as it is.
+fn remote(setup: &Setup) -> Result<(Setup, Vec<Forward>), Error> {
+    let mut setup = setup.clone();
+    let mut forwards = Vec::new();
+    if setup.host.is_remote() {
+        if let Some(tools) = setup.tools.as_mut() {
+            let (servers, ports) = mcp::forward(&tools.servers).map_err(Error::Setup)?;
+            tools.servers = servers;
+            forwards = ports;
+        }
+    }
+    Ok((setup, forwards))
+}
+
 impl Conversation {
     /// Starts the engine. It waits for the first message.
     pub fn open(setup: &Setup) -> Result<Conversation, Error> {
         let engine = setup.engine;
         let io = |doing: String| move |error| Error::Io { doing, error };
+        // A remote engine reaches local servers through forwarded ports.
+        let (setup, forwards) = &remote(setup)?;
         let (args, env) = match engine {
             Engine::Claude => (claude::args(setup), Vec::new()),
             Engine::Pi => pi::args(setup).map_err(io(format!("writing the {engine} extension")))?,
         };
-        let mut command = setup.host.launch(engine.name(), &args, &env, &[]);
+        let mut command = setup.host.launch(engine.name(), &args, &env, forwards);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -513,38 +522,9 @@ impl Drop for Conversation {
     }
 }
 
-/// The MCP servers as Claude Code's `--mcp-config` takes them: a JSON
-/// object, `{"mcpServers": {"<name>": {"command": ..., "args": [...]}}}`.
-pub fn mcp_config(servers: &[McpServer]) -> Value {
-    let servers: serde_json::Map<String, Value> = servers
-        .iter()
-        .map(|s| {
-            (
-                s.name.clone(),
-                json!({ "command": s.command, "args": s.args }),
-            )
-        })
-        .collect();
-    json!({ "mcpServers": servers })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn config_for_claude() {
-        let server = McpServer {
-            name: "tools".into(),
-            command: "/bin/server".into(),
-            args: vec!["mcp".into(), "--only".into(), "a,b".into()],
-            description: Some("not for Claude".into()),
-        };
-        assert_eq!(
-            mcp_config(&[server]).to_string(),
-            r#"{"mcpServers":{"tools":{"args":["mcp","--only","a,b"],"command":"/bin/server"}}}"#
-        );
-    }
 
     #[test]
     fn session_ids() {

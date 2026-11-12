@@ -7,10 +7,10 @@
 use crate::activity::Activity;
 use crate::question::{Answer, Question};
 use crate::run::{Session, Setup};
+use crate::Host;
 use serde_json::{json, Value};
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::process::ChildStdin;
+use std::process::{ChildStdin, Stdio};
 
 /// Environment variables for the engine.
 type Env = Vec<(String, String)>;
@@ -37,7 +37,7 @@ pub(crate) fn args(setup: &Setup) -> io::Result<(Vec<String>, Env)> {
         Some(tools) => {
             if !tools.servers.is_empty() {
                 a.push("-e".into());
-                a.push(extension(setup)?.to_string_lossy().into_owned());
+                a.push(extension(setup)?);
                 env.push(("LEJCE_MCP_SERVERS".into(), servers(setup).to_string()));
             }
             let names: Vec<String> = tools
@@ -66,36 +66,59 @@ pub(crate) fn args(setup: &Setup) -> io::Result<(Vec<String>, Env)> {
     Ok((a, env))
 }
 
-/// The servers as the extension reads them: `{"<name>": {"command": ...,
-/// "args": [...], "description": ...}}`.
+/// The servers as the extension reads them: `{"<name>": {<the server's
+/// configuration>, "description": ...}}`.
 fn servers(setup: &Setup) -> Value {
     let servers: serde_json::Map<String, Value> = setup
         .tools
         .iter()
         .flat_map(|t| &t.servers)
         .map(|s| {
-            let description = s
+            let mut config = s.config();
+            config["description"] = json!(s
                 .description
                 .clone()
-                .unwrap_or_else(|| format!("{} tools", s.name));
-            (
-                s.name.clone(),
-                json!({ "command": s.command, "args": s.args, "description": description }),
-            )
+                .unwrap_or_else(|| format!("{} tools", s.name)));
+            (s.name.clone(), config)
         })
         .collect();
     Value::Object(servers)
 }
 
-/// Writes the extension to the program's folder, if it is not there yet
-/// or changed. Returns its path.
-fn extension(setup: &Setup) -> io::Result<PathBuf> {
+/// Where the extension lives on a remote machine.
+const REMOTE_FOLDER: &str = "~/.cache/lejce";
+
+/// Writes the extension where pi runs, if it is not there yet or changed:
+/// to the program's folder here, or to REMOTE_FOLDER on a remote machine.
+/// Returns its path, as pi on that machine sees it.
+fn extension(setup: &Setup) -> io::Result<String> {
+    if let Host::Ssh { destination, .. } = &setup.host {
+        let path = format!("{REMOTE_FOLDER}/lejce-pi-mcp.ts");
+        let script = format!("mkdir -p {REMOTE_FOLDER} && cat > {path}");
+        let host = Host::Ssh {
+            destination: destination.clone(),
+            folder: None,
+        };
+        let mut copy = host
+            .command("sh", &["-c".into(), script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        copy.stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(EXTENSION.as_bytes())?;
+        if !copy.wait()?.success() {
+            return Err(io::Error::other(format!("cannot copy it to {destination}")));
+        }
+        return Ok(path);
+    }
     let path = setup.files.join("lejce-pi-mcp.ts");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(EXTENSION) {
         std::fs::create_dir_all(&setup.files)?;
         std::fs::write(&path, EXTENSION)?;
     }
-    Ok(path)
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Sends one RPC command.
@@ -235,7 +258,8 @@ fn dialog(request: &Value, ask: &dyn Fn(&Question) -> Answer) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{McpServer, Tools};
+    use crate::mcp::McpServer;
+    use crate::run::Tools;
     use crate::{Engine, Host};
     use std::cell::RefCell;
 
@@ -301,12 +325,7 @@ mod tests {
             session: Session::None,
             tools: Some(Tools {
                 builtin: vec!["bash".into()],
-                servers: vec![McpServer {
-                    name: "tools".into(),
-                    command: "server".into(),
-                    args: vec!["--x".into()],
-                    description: None,
-                }],
+                servers: vec![McpServer::stdio("tools", "server", vec!["--x".into()])],
             }),
             files: files.clone(),
         };

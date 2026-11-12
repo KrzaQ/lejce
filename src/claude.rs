@@ -2,7 +2,8 @@
 //! message goes in as one JSON line, and Claude Code waits for the next
 //! one after its `result` event.
 
-use crate::run::{mcp_config, Session, Setup};
+use crate::mcp::mcp_config;
+use crate::run::{Session, Setup};
 
 pub(crate) fn args(setup: &Setup) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
@@ -54,7 +55,8 @@ pub(crate) fn args(setup: &Setup) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{McpServer, Tools};
+    use crate::mcp::McpServer;
+    use crate::run::Tools;
     use crate::{Engine, Host};
 
     fn setup(tools: Option<Tools>, session: Session) -> Setup {
@@ -102,12 +104,7 @@ mod tests {
     fn with_a_server() {
         let tools = Tools {
             builtin: vec!["WebSearch".into(), "Bash".into()],
-            servers: vec![McpServer {
-                name: "tools".into(),
-                command: "server".into(),
-                args: vec![],
-                description: None,
-            }],
+            servers: vec![McpServer::stdio("tools", "server", vec![])],
         };
         let args = args(&setup(Some(tools), Session::None));
         let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();

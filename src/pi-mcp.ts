@@ -1,9 +1,10 @@
-// Gives pi the MCP servers of one run, without touching pi's own settings.
-// Lejce writes this file to the program's folder and passes it with
+// Gives pi the MCP servers of one conversation, without touching pi's own
+// settings. Lejce writes this file where pi runs and passes it with
 // `pi -e <file>`, together with the servers in an environment variable:
 //
-//   LEJCE_MCP_SERVERS  {"<name>": {"command": ..., "args": [...],
-//                                  "description": ...}, ...}
+//   LEJCE_MCP_SERVERS  {"<name>": {"command": ..., "args": [...]}, ...}
+//                      or {"<name>": {"type": "http", "url": ...}, ...},
+//                      each with a "description"
 //
 // The tools are "direct": declared to the model like pi's own tools, as
 // mcp__<name>__<tool>.
@@ -13,11 +14,6 @@ export default function (pi: any) {
 	if (!text) return;
 	const servers: Record<string, any> = JSON.parse(text);
 	for (const [name, server] of Object.entries(servers)) {
-		pi.registerMcpServer(name, {
-			command: server.command,
-			args: server.args ?? [],
-			exposure: "direct",
-			description: server.description,
-		});
+		pi.registerMcpServer(name, { ...server, exposure: "direct" });
 	}
 }

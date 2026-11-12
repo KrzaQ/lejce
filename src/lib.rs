@@ -12,6 +12,7 @@ pub mod activity;
 mod claude;
 pub mod engine;
 pub mod host;
+pub mod mcp;
 mod pi;
 pub mod question;
 pub mod run;
@@ -20,9 +21,9 @@ pub mod usage;
 pub use activity::Activity;
 pub use engine::Engine;
 pub use host::{Forward, Host};
+pub use mcp::{McpServer, Transport};
 pub use question::{Answer, Question};
 pub use run::{
-    cancel_all, new_session_id, run, Canceller, Conversation, Error, McpServer, Outcome, Session,
-    Setup, Tools,
+    cancel_all, new_session_id, run, Canceller, Conversation, Error, Outcome, Session, Setup, Tools,
 };
 pub use usage::Call;
