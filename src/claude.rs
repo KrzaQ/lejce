@@ -16,6 +16,9 @@ pub(crate) fn args(setup: &Setup) -> Vec<String> {
         Session::New(id) => push(&["--session-id", id]),
         Session::Resume(id) => push(&["--resume", id]),
     }
+    if setup.disable_hooks {
+        push(&["--settings", r#"{"disableAllHooks":true}"#]);
+    }
     // Events while it works; the thinking as a summary (Claude Code leaves
     // it out by default).
     push(&["--input-format", "stream-json"]);
@@ -69,6 +72,7 @@ mod tests {
             project: false,
             tools,
             session,
+            disable_hooks: false,
             files: "/tmp".into(),
         }
     }
@@ -98,6 +102,16 @@ mod tests {
             !old.contains("--continue") && !old.contains("--no-session"),
             "{old}"
         );
+    }
+
+    #[test]
+    fn hooks() {
+        let mut s = setup(None, Session::None);
+        assert!(!args(&s).contains(&"--settings".to_string()));
+        s.disable_hooks = true;
+        let a = args(&s);
+        let i = a.iter().position(|w| w == "--settings").unwrap();
+        assert_eq!(a[i + 1], r#"{"disableAllHooks":true}"#);
     }
 
     #[test]

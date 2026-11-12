@@ -8,6 +8,7 @@
 //!   --resume <id>        continue an engine session
 //!   --mcp <name>=<url>   an HTTP MCP server on this machine (repeatable;
 //!                        forwarded to a remote engine)
+//!   --no-hooks           turn off the user's Claude Code hooks
 //!   --allow              answer the engine's questions with yes, or with
 //!                        the first option (otherwise: no answer)
 //!
@@ -77,6 +78,7 @@ fn main() {
             servers,
         }),
         session,
+        disable_hooks: args.iter().any(|a| a == "--no-hooks"),
         files: std::env::temp_dir().join("lejce-talk"),
     };
     let mut conversation = match Conversation::open(&setup) {

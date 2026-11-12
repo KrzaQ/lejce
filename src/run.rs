@@ -60,6 +60,11 @@ pub struct Setup {
     /// None: no tools at all.
     pub tools: Option<Tools>,
     pub session: Session,
+    /// Turn off the user's own hooks for this engine (Claude Code's
+    /// `disableAllHooks`). Hooks that bind every session in a folder to
+    /// something, a chat bot for example, should not catch the program's
+    /// sessions. pi keeps its extensions: they guard the tools.
+    pub disable_hooks: bool,
     /// A folder of the program's own where Lejce may write files that the
     /// engine reads (pi's extension for MCP servers).
     pub files: PathBuf,

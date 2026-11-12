@@ -323,6 +323,7 @@ mod tests {
             system: "Be brief.".into(),
             project: true,
             session: Session::None,
+            disable_hooks: false,
             tools: Some(Tools {
                 builtin: vec!["bash".into()],
                 servers: vec![McpServer::stdio("tools", "server", vec!["--x".into()])],
