@@ -4,6 +4,7 @@
 //! cancelling stops the tools it started too.
 
 use crate::activity::Activity;
+use crate::host::REMOTE_PID;
 use crate::mcp::{self, McpServer};
 use crate::question::{Answer, Question};
 use crate::{claude, pi, Engine, Forward, Host};
@@ -118,8 +119,54 @@ impl error::Error for Error {
 
 /// An engine process, so that it can be cancelled.
 struct Running {
+    /// The local process: the engine, or ssh for a remote engine.
     pid: u32,
     cancelled: bool,
+    remote: Option<Remote>,
+}
+
+/// A remote engine's process group. Ending the local ssh leaves it
+/// running, so Lejce stops it over a connection of its own.
+#[derive(Clone)]
+struct Remote {
+    host: Host,
+    /// The engine's pid there, once the remote shell reports it; it leads
+    /// the group.
+    pid: Arc<Mutex<Option<u32>>>,
+}
+
+impl Remote {
+    /// Sends `signal` to the group, waiting up to two seconds for its pid.
+    fn signal(&self, signal: &str) {
+        let started = Instant::now();
+        let pid = loop {
+            if let Some(pid) = *self.pid.lock().unwrap() {
+                break pid;
+            }
+            if started.elapsed() > Duration::from_secs(2) {
+                eprintln!("engine: the remote process id is unknown; it may still run");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let _ = self
+            .host
+            .signal_group(pid, signal)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    /// SIGTERM now, and SIGKILL a second later on another thread.
+    fn stop(&self) {
+        self.signal("TERM");
+        let remote = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            remote.signal("KILL");
+        });
+    }
 }
 
 static RUNNING: Mutex<Vec<Running>> = Mutex::new(Vec::new());
@@ -133,16 +180,24 @@ pub fn cancel_all() {
 }
 
 /// Stops one engine's process group: SIGTERM, and SIGKILL a second later
-/// if any of it is still there.
+/// if any of it is still there. A remote engine's group is stopped on its
+/// machine too, from another thread, so that the caller does not wait for
+/// the connection.
 fn cancel(pid: u32) {
-    {
+    let remote = {
         let mut running = RUNNING.lock().unwrap();
         match running.iter_mut().find(|r| r.pid == pid) {
-            Some(r) => r.cancelled = true,
+            Some(r) => {
+                r.cancelled = true;
+                r.remote.clone()
+            }
             None => return,
         }
-    }
+    };
     eprintln!("engine: cancelling process group {pid}");
+    if let Some(remote) = remote {
+        std::thread::spawn(move || remote.stop());
+    }
     signal_group(pid, "TERM");
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(1));
@@ -298,17 +353,35 @@ impl Conversation {
         command.process_group(0);
         let mut child = command.spawn().map_err(io(format!("starting {engine}")))?;
         let pid = child.id();
+        let remote = setup.host.is_remote().then(|| Remote {
+            host: setup.host.clone(),
+            pid: Arc::new(Mutex::new(None)),
+        });
         RUNNING.lock().unwrap().push(Running {
             pid,
             cancelled: false,
+            remote: remote.clone(),
         });
         let errors = Arc::new(Mutex::new(String::new()));
         let mut stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
         let reader = {
             let errors = Arc::clone(&errors);
+            let remote_pid = remote.as_ref().map(|r| Arc::clone(&r.pid));
             std::thread::spawn(move || {
                 let mut line = String::new();
                 while matches!(stderr.read_line(&mut line), Ok(n) if n > 0) {
+                    // The remote shell's first line: the engine's pid.
+                    let reported = line
+                        .strip_prefix(REMOTE_PID)
+                        .and_then(|rest| rest.trim().parse::<u32>().ok());
+                    if let (Some(slot), Some(pid)) = (&remote_pid, reported) {
+                        let mut slot = slot.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(pid);
+                            line.clear();
+                            continue;
+                        }
+                    }
                     let mut text = errors.lock().unwrap();
                     text.push_str(&line);
                     if text.len() > ERRORS * 2 {
@@ -516,14 +589,29 @@ impl Drop for Conversation {
     /// A conversation that is dropped without `close` may be in the middle
     /// of a message: stop the engine, so that nothing runs on unseen.
     fn drop(&mut self) {
+        let mut stopped = cancelled(self.pid);
         if self.input.is_some() || self.reader.is_some() {
             self.input.take();
             if matches!(self.child.try_wait(), Ok(None)) {
                 cancel(self.pid);
+                stopped = true;
                 let _ = self.child.wait();
             }
         }
-        RUNNING.lock().unwrap().retain(|r| r.pid != self.pid);
+        let remote = {
+            let mut running = RUNNING.lock().unwrap();
+            let remote = running
+                .iter()
+                .find(|r| r.pid == self.pid)
+                .and_then(|r| r.remote.clone());
+            running.retain(|r| r.pid != self.pid);
+            remote
+        };
+        // `cancel` stops a remote engine from another thread, and the
+        // program may exit before that thread runs. Stop it here as well.
+        if let (true, Some(remote)) = (stopped, remote) {
+            remote.signal("TERM");
+        }
     }
 }
 

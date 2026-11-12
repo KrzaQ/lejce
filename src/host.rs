@@ -26,10 +26,14 @@ pub struct Forward {
     pub port: u16,
 }
 
+/// The start of the line in which a remote shell reports the program's
+/// process id.
+pub const REMOTE_PID: &str = "lejce-pid";
+
 impl Host {
     /// A command that runs `program` with `args` on this host.
     pub fn command(&self, program: &str, args: &[String]) -> Command {
-        self.launch(program, args, &[], &[])
+        self.build(program, args, &[], &[], false)
     }
 
     pub fn is_remote(&self) -> bool {
@@ -43,12 +47,29 @@ impl Host {
     /// Over SSH the remote shell reads one command line, so every word is
     /// quoted for it, and the variables go through `env`. `-T` because
     /// engines talk through pipes, not a terminal.
+    ///
+    /// Over SSH the remote shell first writes `lejce-pid <pid>` to the
+    /// error output (`REMOTE_PID`). The program runs as that process, which
+    /// leads its own process group there, so that `signal_group` can stop
+    /// it and the tools it started: ending the local ssh leaves them
+    /// running.
     pub fn launch(
         &self,
         program: &str,
         args: &[String],
         env: &[(String, String)],
         forwards: &[Forward],
+    ) -> Command {
+        self.build(program, args, env, forwards, true)
+    }
+
+    fn build(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        forwards: &[Forward],
+        report_pid: bool,
     ) -> Command {
         match self {
             Host::Local { folder } => {
@@ -65,6 +86,9 @@ impl Host {
                 folder,
             } => {
                 let mut line = String::new();
+                if report_pid {
+                    line.push_str(&format!("printf '{REMOTE_PID} %s\\n' $$ >&2; "));
+                }
                 if let Some(folder) = folder {
                     line.push_str(&format!("cd {} && ", quote(folder)));
                 }
@@ -94,6 +118,25 @@ impl Host {
                         .arg(format!("{}:{}:{}", f.remote, f.host, f.port));
                 }
                 command.args(["--", destination, &line]);
+                command
+            }
+        }
+    }
+
+    /// A command that sends `signal` ("TERM", "KILL") to the process group
+    /// `pid` on this host. Over SSH it opens its own connection.
+    pub fn signal_group(&self, pid: u32, signal: &str) -> Command {
+        let words = [format!("-{signal}"), "--".into(), format!("-{pid}")];
+        match self {
+            Host::Local { .. } => {
+                let mut command = Command::new("/bin/kill");
+                command.args(words);
+                command
+            }
+            Host::Ssh { destination, .. } => {
+                let mut command = Command::new("ssh");
+                let line = format!("kill {}", words.join(" "));
+                command.args(["-T", "--", destination, &line]);
                 command
             }
         }
@@ -197,8 +240,24 @@ mod tests {
                 "40000:127.0.0.1:8080",
                 "--",
                 "server",
-                r#"exec env 'SERVERS={"a": 1}' pi -e ~/x.ts"#
+                r#"printf 'lejce-pid %s\n' $$ >&2; exec env 'SERVERS={"a": 1}' pi -e ~/x.ts"#
             ]
         );
+    }
+
+    #[test]
+    fn signal_a_remote_group() {
+        let host = Host::Ssh {
+            destination: "server".into(),
+            folder: Some("~/notes".into()),
+        };
+        let command = host.signal_group(4321, "TERM");
+        assert_eq!(command.get_program(), "ssh");
+        assert_eq!(
+            parts(&command),
+            ["-T", "--", "server", "kill -TERM -- -4321"]
+        );
+        let local = Host::Local { folder: None }.signal_group(4321, "KILL");
+        assert_eq!(parts(&local), ["-KILL", "--", "-4321"]);
     }
 }
