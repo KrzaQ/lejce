@@ -9,5 +9,7 @@
 //! Kuterlapa and Lemat both use it. See `docs/design.md` for the plan.
 
 pub mod host;
+pub mod usage;
 
 pub use host::Host;
+pub use usage::Call;
