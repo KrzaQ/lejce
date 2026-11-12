@@ -6,11 +6,28 @@
 //!   --folder <path>      the engine's folder (its project)
 //!   --new                save the conversation in a new engine session
 //!   --resume <id>        continue an engine session
+//!   --mcp <name>=<url>   an HTTP MCP server on this machine (repeatable;
+//!                        forwarded to a remote engine)
+//!   --allow              answer the engine's questions with yes, or with
+//!                        the first option (otherwise: no answer)
 //!
 //! It prints the session id first, so that a later run can resume it.
 
-use lejce::{Answer, Conversation, Engine, Host, Session, Setup};
+use lejce::{Answer, Conversation, Engine, Host, McpServer, Question, Session, Setup, Tools};
 use std::io::BufRead;
+
+/// Prints the question; with --allow, takes yes or the first option.
+fn ask(question: &Question, allow: bool) -> Answer {
+    eprintln!(
+        "[question: {} {:?} {}]",
+        question.text, question.options, question.detail
+    );
+    match (allow, question.options.is_empty()) {
+        (false, _) => Answer::Unanswered,
+        (true, true) => Answer::Yes,
+        (true, false) => Answer::Chose(vec![0]),
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,6 +59,12 @@ fn main() {
         None if args.iter().any(|a| a == "--new") => Session::New(lejce::new_session_id()),
         None => Session::None,
     };
+    let servers: Vec<McpServer> = args
+        .windows(2)
+        .filter(|w| w[0] == "--mcp")
+        .filter_map(|w| w[1].split_once('='))
+        .map(|(name, url)| McpServer::http(name, url))
+        .collect();
     let setup = Setup {
         engine,
         host,
@@ -49,7 +72,10 @@ fn main() {
         effort: None,
         system: "You are a helpful assistant. Answer briefly.".into(),
         project: true,
-        tools: None,
+        tools: (!servers.is_empty()).then(|| Tools {
+            builtin: Vec::new(),
+            servers,
+        }),
         session,
         files: std::env::temp_dir().join("lejce-talk"),
     };
@@ -61,9 +87,10 @@ fn main() {
         }
     };
     println!("session: {}", conversation.session().unwrap_or("none"));
+    let allow = args.iter().any(|a| a == "--allow");
     for line in std::io::stdin().lock().lines() {
         let Ok(message) = line else { break };
-        let outcome = conversation.send(&message, &|_| {}, &|_| Answer::Unanswered);
+        let outcome = conversation.send(&message, &|_| {}, &|q| ask(q, allow));
         let a = &outcome.activity;
         let tools: Vec<&str> = a.steps.iter().map(|s| s.name.as_str()).collect();
         eprintln!(
