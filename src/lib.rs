@@ -19,7 +19,7 @@ pub mod usage;
 
 pub use activity::Activity;
 pub use engine::Engine;
-pub use host::Host;
+pub use host::{Forward, Host};
 pub use question::{Answer, Question};
 pub use run::{cancel_all, run, Error, McpServer, Outcome, Request, Tools};
 pub use usage::Call;
