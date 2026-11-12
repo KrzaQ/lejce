@@ -1,0 +1,85 @@
+//! A conversation from the terminal: each line of input is one message.
+//!
+//!   cargo run --example talk -- <claude|pi> <model> [options]
+//!
+//!   --ssh <destination>  run the engine on another machine
+//!   --folder <path>      the engine's folder (its project)
+//!   --new                save the conversation in a new engine session
+//!   --resume <id>        continue an engine session
+//!
+//! It prints the session id first, so that a later run can resume it.
+
+use lejce::{Answer, Conversation, Engine, Host, Session, Setup};
+use std::io::BufRead;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage =
+        "usage: talk <claude|pi> <model> [--ssh dest] [--folder path] [--new | --resume id]";
+    let (Some(engine), Some(model)) = (args.first().and_then(|e| Engine::parse(e)), args.get(1))
+    else {
+        eprintln!("{usage}");
+        std::process::exit(2);
+    };
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let folder = value("--folder");
+    let host = match value("--ssh") {
+        Some(destination) => Host::Ssh {
+            destination,
+            folder,
+        },
+        None => Host::Local {
+            folder: folder.map(Into::into),
+        },
+    };
+    let session = match value("--resume") {
+        Some(id) => Session::Resume(id),
+        None if args.iter().any(|a| a == "--new") => Session::New(lejce::new_session_id()),
+        None => Session::None,
+    };
+    let setup = Setup {
+        engine,
+        host,
+        model: model.clone(),
+        effort: None,
+        system: "You are a helpful assistant. Answer briefly.".into(),
+        project: true,
+        tools: None,
+        session,
+        files: std::env::temp_dir().join("lejce-talk"),
+    };
+    let mut conversation = match Conversation::open(&setup) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    println!("session: {}", conversation.session().unwrap_or("none"));
+    for line in std::io::stdin().lock().lines() {
+        let Ok(message) = line else { break };
+        let outcome = conversation.send(&message, &|_| {}, &|_| Answer::Unanswered);
+        let a = &outcome.activity;
+        let tools: Vec<&str> = a.steps.iter().map(|s| s.name.as_str()).collect();
+        eprintln!(
+            "[{} in, {} out, context {}, tools {:?}]",
+            a.input,
+            a.output(),
+            a.context,
+            tools
+        );
+        match outcome.answer {
+            Ok(answer) => println!("{answer}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    conversation.close();
+}
