@@ -1,14 +1,23 @@
-//! Claude Code: `claude -p`, one request per process. The message goes in
-//! as an argument; the events come out as stream-json.
+//! Claude Code: `claude -p` with stream-json in both directions. Each
+//! message goes in as one JSON line, and Claude Code waits for the next
+//! one after its `result` event.
 
-use crate::run::{mcp_config, Request};
+use crate::run::{mcp_config, Session, Setup};
 
-pub(crate) fn args(request: &Request) -> Vec<String> {
+pub(crate) fn args(setup: &Setup) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     let mut push = |words: &[&str]| a.extend(words.iter().map(|w| w.to_string()));
-    push(&["-p", "--model", &request.model, "--no-session-persistence"]);
+    push(&["-p", "--model", &setup.model]);
+    // Never --continue: it takes the latest conversation in the folder,
+    // which may belong to another program or to a terminal session.
+    match &setup.session {
+        Session::None => push(&["--no-session-persistence"]),
+        Session::New(id) => push(&["--session-id", id]),
+        Session::Resume(id) => push(&["--resume", id]),
+    }
     // Events while it works; the thinking as a summary (Claude Code leaves
     // it out by default).
+    push(&["--input-format", "stream-json"]);
     push(&[
         "--output-format",
         "stream-json",
@@ -16,7 +25,7 @@ pub(crate) fn args(request: &Request) -> Vec<String> {
         "--include-partial-messages",
     ]);
     push(&["--thinking-display", "summarized"]);
-    match &request.tools {
+    match &setup.tools {
         // Its own tools stay off except those named. Its permission
         // classifier ("auto") judges each tool call: nobody sits at a
         // terminal to answer Claude Code's own prompts.
@@ -30,16 +39,15 @@ pub(crate) fn args(request: &Request) -> Vec<String> {
         }
         None => push(&["--tools", ""]),
     }
-    let system = if request.project {
+    let system = if setup.project {
         "--append-system-prompt"
     } else {
         "--system-prompt"
     };
-    push(&[system, &request.system]);
-    if let Some(effort) = &request.effort {
+    push(&[system, &setup.system]);
+    if let Some(effort) = &setup.effort {
         push(&["--effort", effort]);
     }
-    push(&[&request.message]);
     a
 }
 
@@ -49,30 +57,44 @@ mod tests {
     use crate::run::{McpServer, Tools};
     use crate::{Engine, Host};
 
-    fn request(tools: Option<Tools>) -> Request {
-        Request {
+    fn setup(tools: Option<Tools>, session: Session) -> Setup {
+        Setup {
             engine: Engine::Claude,
             host: Host::Local { folder: None },
             model: "sonnet".into(),
             effort: Some("low".into()),
             system: "Be brief.".into(),
             project: false,
-            message: "Hello".into(),
             tools,
+            session,
             files: "/tmp".into(),
         }
     }
 
     #[test]
     fn without_tools() {
-        let args = args(&request(None)).join(" ");
+        let args = args(&setup(None, Session::None)).join(" ");
         assert!(
-            args.starts_with("-p --model sonnet --no-session-persistence"),
+            args.starts_with(
+                "-p --model sonnet --no-session-persistence --input-format stream-json"
+            ),
             "{args}"
         );
         assert!(
-            args.ends_with("--tools  --system-prompt Be brief. --effort low Hello"),
+            args.ends_with("--tools  --system-prompt Be brief. --effort low"),
             "{args}"
+        );
+    }
+
+    #[test]
+    fn sessions() {
+        let new = args(&setup(None, Session::New("a1".into()))).join(" ");
+        assert!(new.contains("--session-id a1"), "{new}");
+        let old = args(&setup(None, Session::Resume("a1".into()))).join(" ");
+        assert!(old.contains("--resume a1"), "{old}");
+        assert!(
+            !old.contains("--continue") && !old.contains("--no-session"),
+            "{old}"
         );
     }
 
@@ -87,7 +109,7 @@ mod tests {
                 description: None,
             }],
         };
-        let args = args(&request(Some(tools)));
+        let args = args(&setup(Some(tools), Session::None));
         let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
         assert_eq!(at("--tools"), "WebSearch,Bash");
         assert_eq!(

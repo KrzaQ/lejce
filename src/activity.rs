@@ -105,6 +105,8 @@ pub struct Activity {
     /// The final answer and the error, when the engine has finished.
     pub answer: Option<String>,
     pub error: Option<String>,
+    /// The engine has finished the message and waits for the next one.
+    pub(crate) ended: bool,
 }
 
 impl Activity {
@@ -131,6 +133,7 @@ impl Activity {
             limits: Vec::new(),
             answer: None,
             error: None,
+            ended: false,
         }
     }
 
@@ -358,14 +361,23 @@ impl Activity {
                     self.calls.push(Call::claude(model, u));
                 }
                 if e["is_error"].as_bool().unwrap_or(false) {
-                    let error = e["result"]
-                        .as_str()
-                        .or(e["subtype"].as_str())
-                        .unwrap_or("error");
-                    self.error = Some(error.to_string());
+                    let errors: Vec<&str> = e["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    let error = match e["result"].as_str() {
+                        Some(result) => result.to_string(),
+                        None if !errors.is_empty() => errors.join("; "),
+                        None => e["subtype"].as_str().unwrap_or("error").to_string(),
+                    };
+                    self.error = Some(error);
                 } else {
                     self.answer = Some(str(&e["result"]).trim().to_string());
                 }
+                // Claude Code waits for the next message now.
+                self.ended = true;
                 true
             }
             _ => false,
@@ -583,6 +595,7 @@ mod tests {
         assert_eq!(a.input, 6949 + 7049);
         assert_eq!(a.output(), 82 + 2);
         assert_eq!(a.answer.as_deref(), Some("7 tabs."));
+        assert!(a.ended);
         // The latest call: 2 new, 100 written to the cache, 6947 read from it.
         assert_eq!(a.context, 7049);
         assert_eq!(a.window, Some(1_000_000));

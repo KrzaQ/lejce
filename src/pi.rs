@@ -1,11 +1,12 @@
-//! pi in its RPC mode (`pi --mode rpc`): the request goes in as a command,
+//! pi in its RPC mode (`pi --mode rpc`): each message goes in as a command,
 //! and the input stays open, so that pi's extensions can ask the user
-//! (pi-censor asks before a call it is unsure of). pi has no MCP support of
-//! its own; a small extension (pi-mcp.ts) registers the request's servers.
+//! (pi-censor asks before a call it is unsure of) and the next message can
+//! follow. pi has no MCP support of its own; a small extension (pi-mcp.ts)
+//! registers the conversation's servers.
 
 use crate::activity::Activity;
 use crate::question::{Answer, Question};
-use crate::run::Request;
+use crate::run::{Session, Setup};
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -19,20 +20,25 @@ const EXTENSION: &str = include_str!("pi-mcp.ts");
 
 /// The arguments, and the environment the extension reads. The request
 /// itself goes in later, as an RPC command (`send`).
-pub(crate) fn args(request: &Request) -> io::Result<(Vec<String>, Env)> {
-    let mut a: Vec<String> = ["--mode", "rpc", "--no-session", "--model", &request.model]
+pub(crate) fn args(setup: &Setup) -> io::Result<(Vec<String>, Env)> {
+    let mut a: Vec<String> = ["--mode", "rpc", "--model", &setup.model]
         .map(String::from)
         .to_vec();
+    match &setup.session {
+        Session::None => a.push("--no-session".into()),
+        // pi creates a missing session; the first message checks for that.
+        Session::New(id) | Session::Resume(id) => a.extend(["--session-id".into(), id.clone()]),
+    }
     let mut env = Vec::new();
-    match &request.tools {
+    match &setup.tools {
         // The extension registers the servers for this run only; pi's own
         // settings stay as they are, so its extensions (a permission
         // classifier, for example) still judge each call.
         Some(tools) => {
             if !tools.servers.is_empty() {
                 a.push("-e".into());
-                a.push(extension(request)?.to_string_lossy().into_owned());
-                env.push(("LEJCE_MCP_SERVERS".into(), servers(request).to_string()));
+                a.push(extension(setup)?.to_string_lossy().into_owned());
+                env.push(("LEJCE_MCP_SERVERS".into(), servers(setup).to_string()));
             }
             let names: Vec<String> = tools
                 .builtin
@@ -44,26 +50,26 @@ pub(crate) fn args(request: &Request) -> io::Result<(Vec<String>, Env)> {
         }
         None => a.push("--no-tools".into()),
     }
-    if request.project {
-        a.extend(["--append-system-prompt".into(), request.system.clone()]);
+    if setup.project {
+        a.extend(["--append-system-prompt".into(), setup.system.clone()]);
     } else {
         a.extend([
             "--no-context-files".into(),
             "--system-prompt".into(),
-            request.system.clone(),
+            setup.system.clone(),
         ]);
     }
     a.extend([
         "--thinking".into(),
-        request.effort.clone().unwrap_or_else(|| "off".into()),
+        setup.effort.clone().unwrap_or_else(|| "off".into()),
     ]);
     Ok((a, env))
 }
 
 /// The servers as the extension reads them: `{"<name>": {"command": ...,
 /// "args": [...], "description": ...}}`.
-fn servers(request: &Request) -> Value {
-    let servers: serde_json::Map<String, Value> = request
+fn servers(setup: &Setup) -> Value {
+    let servers: serde_json::Map<String, Value> = setup
         .tools
         .iter()
         .flat_map(|t| &t.servers)
@@ -83,10 +89,10 @@ fn servers(request: &Request) -> Value {
 
 /// Writes the extension to the program's folder, if it is not there yet
 /// or changed. Returns its path.
-fn extension(request: &Request) -> io::Result<PathBuf> {
-    let path = request.files.join("lejce-pi-mcp.ts");
+fn extension(setup: &Setup) -> io::Result<PathBuf> {
+    let path = setup.files.join("lejce-pi-mcp.ts");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(EXTENSION) {
-        std::fs::create_dir_all(&request.files)?;
+        std::fs::create_dir_all(&setup.files)?;
         std::fs::write(&path, EXTENSION)?;
     }
     Ok(path)
@@ -98,8 +104,9 @@ pub(crate) fn send(stdin: &mut ChildStdin, command: &Value) -> io::Result<()> {
 }
 
 /// Handles what only pi's RPC mode sends: answers to commands, the end of
-/// the work, and questions from its extensions. Closing the input ends pi.
-/// Returns true after a question, so the program shows its work again.
+/// the work, and questions from its extensions. Marks the activity ended
+/// when pi waits for the next message. Returns true after a question, so
+/// the program shows its work again.
 pub(crate) fn record(
     line: &str,
     input: &mut Option<ChildStdin>,
@@ -110,11 +117,11 @@ pub(crate) fn record(
         return false;
     };
     match record["type"].as_str() {
-        // pi's own figure of how full the context is; then pi may quit.
+        // pi's own figure of how full the context is: the message is done.
         Some("response") if record["command"] == "get_session_stats" => {
             let usage = &record["data"]["contextUsage"];
             activity.set_context(usage["tokens"].as_u64(), usage["contextWindow"].as_u64());
-            input.take();
+            activity.ended = true;
             true
         }
         Some("response") if record["success"] == false => {
@@ -124,28 +131,27 @@ pub(crate) fn record(
                     .unwrap_or("pi refused the request")
                     .to_string(),
             );
-            input.take();
+            activity.ended = true;
             false
         }
         // The prompt did not start any work (a command, for example).
         Some("response")
             if record["command"] == "prompt" && record["data"]["disposition"] == "handled" =>
         {
-            input.take();
+            activity.ended = true;
             false
         }
-        // pi will not go on by itself: the request is done. Ask how full
-        // the context is before letting pi quit.
+        // pi will not go on by itself. Ask how full the context is; the
+        // answer ends the message.
         Some("agent_settled") => {
-            if let Some(stdin) = input.as_mut() {
-                if send(
+            let asked = input.as_mut().map(|stdin| {
+                send(
                     stdin,
                     &json!({ "id": "stats", "type": "get_session_stats" }),
                 )
-                .is_err()
-                {
-                    input.take();
-                }
+            });
+            if !matches!(asked, Some(Ok(()))) {
+                activity.ended = true;
             }
             false
         }
@@ -285,14 +291,14 @@ mod tests {
     #[test]
     fn tools_through_the_extension() {
         let files = std::env::temp_dir().join(format!("lejce-test-{}", std::process::id()));
-        let request = Request {
+        let setup = Setup {
             engine: Engine::Pi,
             host: Host::Local { folder: None },
             model: "local/model".into(),
             effort: None,
             system: "Be brief.".into(),
             project: true,
-            message: "Hello".into(),
+            session: Session::None,
             tools: Some(Tools {
                 builtin: vec!["bash".into()],
                 servers: vec![McpServer {
@@ -304,7 +310,7 @@ mod tests {
             }),
             files: files.clone(),
         };
-        let (args, env) = args(&request).unwrap();
+        let (args, env) = args(&setup).unwrap();
         let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
         assert_eq!(at("--tools"), "bash,mcp__tools__*");
         assert_eq!(at("--append-system-prompt"), "Be brief.");
