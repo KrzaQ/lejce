@@ -8,8 +8,12 @@
 //!
 //! Kuterlapa and Lemat both use it. See `docs/design.md` for the plan.
 
+pub mod activity;
+pub mod engine;
 pub mod host;
 pub mod usage;
 
+pub use activity::Activity;
+pub use engine::Engine;
 pub use host::Host;
 pub use usage::Call;
