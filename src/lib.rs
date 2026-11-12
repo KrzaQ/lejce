@@ -11,9 +11,11 @@
 pub mod activity;
 pub mod engine;
 pub mod host;
+pub mod question;
 pub mod usage;
 
 pub use activity::Activity;
 pub use engine::Engine;
 pub use host::Host;
+pub use question::{Answer, Question};
 pub use usage::Call;
