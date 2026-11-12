@@ -72,6 +72,22 @@ its command must exist on the remote machine.
 Over SSH, pi's extension goes to `~/.cache/lejce/` on the remote machine,
 and the server list goes through `env` on the remote command line.
 
+The forwarded port is open only on the remote machine's loopback
+interface, unless that machine's sshd has `GatewayPorts yes`: then it
+listens on every address, and other machines can reach the local server.
+Lejce cannot change this from the client. Such a server must use
+`GatewayPorts clientspecified` (or `no`). A program should also protect
+its tools itself, for example with a secret token in the URL, because
+other users of the remote machine can reach the port too.
+
+## Hooks
+
+The user's own Claude Code hooks run for every session in a folder. A
+program can turn them off for its engine (`Setup::disable_hooks`, which
+passes `--settings {"disableAllHooks":true}`), so that hooks meant for the
+user's terminal sessions do not catch the program's sessions. pi has no
+such setting in Lejce: its extensions guard the tools, so they stay.
+
 ## Questions from the engine
 
 - Claude Code: `--permission-prompt-tool` sends permission prompts to an MCP
@@ -86,6 +102,12 @@ The program shows the question and returns the answer through Lejce.
 
 Each engine runs in its own process group. Cancelling stops the whole group,
 so that tools the engine started stop too.
+
+Over SSH, the local process is ssh, and ending it leaves the remote engine
+running. The remote shell therefore writes `lejce-pid <pid>` to the error
+output before it starts the engine, and the engine leads its own process
+group there. Cancelling, or dropping a conversation that still runs, sends
+the signals to that group over a new ssh connection.
 
 ## Steps
 
