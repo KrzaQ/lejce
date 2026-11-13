@@ -9,12 +9,17 @@
 //!   --mcp <name>=<url>   an HTTP MCP server on this machine (repeatable;
 //!                        forwarded to a remote engine)
 //!   --no-hooks           turn off the user's Claude Code hooks
+//!   --shell              give the engine its own shell tool
+//!   --ask                ask the user before tool calls the engine's rules
+//!                        do not settle (otherwise its classifier decides)
 //!   --allow              answer the engine's questions with yes, or with
 //!                        the first option (otherwise: no answer)
 //!
 //! It prints the session id first, so that a later run can resume it.
 
-use lejce::{Answer, Conversation, Engine, Host, McpServer, Question, Session, Setup, Tools};
+use lejce::{
+    Answer, Conversation, Engine, Host, McpServer, Permissions, Question, Session, Setup, Tools,
+};
 use std::io::BufRead;
 
 /// Prints the question; with --allow, takes yes or the first option.
@@ -66,6 +71,17 @@ fn main() {
         .filter_map(|w| w[1].split_once('='))
         .map(|(name, url)| McpServer::http(name, url))
         .collect();
+    let flag = |name: &str| args.iter().any(|a| a == name);
+    let builtin: Vec<String> = match (flag("--shell"), engine) {
+        (false, _) => Vec::new(),
+        (true, Engine::Pi) => vec!["bash".into()],
+        (true, _) => vec!["Bash".into()],
+    };
+    let permissions = if flag("--ask") {
+        Permissions::Ask
+    } else {
+        Permissions::Auto
+    };
     let setup = Setup {
         engine,
         host,
@@ -73,9 +89,10 @@ fn main() {
         effort: None,
         system: "You are a helpful assistant. Answer briefly.".into(),
         project: true,
-        tools: (!servers.is_empty()).then(|| Tools {
-            builtin: Vec::new(),
+        tools: (!servers.is_empty() || !builtin.is_empty()).then_some(Tools {
+            builtin,
             servers,
+            permissions,
         }),
         session,
         disable_hooks: args.iter().any(|a| a == "--no-hooks"),
