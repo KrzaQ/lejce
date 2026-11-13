@@ -7,7 +7,7 @@ use crate::activity::Activity;
 use crate::host::REMOTE_PID;
 use crate::mcp::{self, McpServer};
 use crate::question::{Answer, Question};
-use crate::{claude, pi, Engine, Forward, Host};
+use crate::{claude, codex, pi, Engine, Forward, Host};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Lines, Read};
 use std::os::unix::process::CommandExt;
@@ -330,6 +330,10 @@ pub struct Conversation {
     errors: Arc<Mutex<String>>,
     reader: Option<JoinHandle<()>>,
     messages: u64,
+    /// Codex: the thread, the model it reports, and the effort per turn.
+    thread: String,
+    model: String,
+    effort: Option<String>,
 }
 
 /// At most this much of the engine's error output is kept: the latest.
@@ -360,6 +364,7 @@ impl Conversation {
         let (args, env) = match engine {
             Engine::Claude => (claude::args(setup), Vec::new()),
             Engine::Pi => pi::args(setup).map_err(io(format!("writing the {engine} extension")))?,
+            Engine::Codex => (codex::args(setup), Vec::new()),
         };
         let mut command = setup.host.launch(engine.name(), &args, &env, forwards);
         command
@@ -415,7 +420,7 @@ impl Conversation {
             Session::None => None,
             Session::New(id) | Session::Resume(id) => Some(id.clone()),
         };
-        Ok(Conversation {
+        let mut conversation = Conversation {
             engine,
             servers: setup
                 .tools
@@ -432,7 +437,63 @@ impl Conversation {
             errors,
             reader: Some(reader),
             messages: 0,
-        })
+            thread: String::new(),
+            model: setup.model.clone(),
+            effort: setup.effort.clone(),
+        };
+        if engine == Engine::Codex {
+            conversation.codex_thread(setup)?;
+        }
+        Ok(conversation)
+    }
+
+    /// Codex: the handshake, then the thread. Codex names a new thread
+    /// itself; its id becomes the session.
+    fn codex_thread(&mut self, setup: &Setup) -> Result<(), Error> {
+        let failed = |message: String| Error::Failed {
+            engine: Engine::Codex,
+            message,
+        };
+        self.request(&codex::initialize(), "initialize")
+            .map_err(failed)?;
+        let _ = self.write(&codex::initialized());
+        match self.request(&codex::thread(setup), "thread") {
+            Ok(result) => {
+                let thread = &result["thread"];
+                self.thread = thread["id"].as_str().unwrap_or_default().to_string();
+                if let Some(model) = result["model"].as_str() {
+                    self.model = model.to_string();
+                }
+                if !matches!(setup.session, Session::None) {
+                    self.session = Some(self.thread.clone());
+                }
+                Ok(())
+            }
+            Err(_) if matches!(setup.session, Session::Resume(_)) => Err(Error::SessionGone),
+            Err(message) => Err(failed(message)),
+        }
+    }
+
+    /// Codex: sends a request and waits for its answer, skipping the
+    /// notifications before it. Err: the error's message, or why there was
+    /// no answer.
+    fn request(&mut self, request: &Value, id: &str) -> Result<Value, String> {
+        if self.write(request).is_err() {
+            return Err(self.stderr());
+        }
+        for line in self.output.by_ref() {
+            let Ok(line) = line else { break };
+            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if record["id"] == id && record.get("method").is_none() {
+                return match record.get("error") {
+                    Some(error) => Err(error["message"].as_str().unwrap_or("error").to_string()),
+                    None => Ok(record["result"].clone()),
+                };
+            }
+        }
+        Err(format!("the engine quit: {}", self.stderr()))
     }
 
     /// The engine session's id, if it has one.
@@ -454,6 +515,7 @@ impl Conversation {
     ) -> Outcome {
         let servers: Vec<&str> = self.servers.iter().map(String::as_str).collect();
         let mut activity = Activity::new(self.engine, &servers);
+        activity.model = self.model.clone();
         let answer = self.turn(message, &mut activity, progress, ask);
         Outcome { activity, answer }
     }
@@ -481,6 +543,9 @@ impl Conversation {
             Engine::Pi => {
                 json!({ "id": format!("prompt-{}", self.messages), "type": "prompt", "message": message })
             }
+            Engine::Codex => {
+                codex::turn(self.effort.as_deref(), &self.thread, self.messages, message)
+            }
         };
         // A failed write means the engine has quit; its output says why.
         let _ = self.write(&command);
@@ -493,6 +558,7 @@ impl Conversation {
             let asked = match engine {
                 Engine::Claude => claude::record(&line, &mut self.input, activity, ask),
                 Engine::Pi => pi::record(&line, &mut self.input, activity, ask),
+                Engine::Codex => codex::record(&line, &mut self.input, activity, ask),
             };
             if asked {
                 progress(activity);

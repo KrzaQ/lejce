@@ -10,6 +10,7 @@
 
 pub mod activity;
 mod claude;
+mod codex;
 pub mod engine;
 pub mod host;
 pub mod mcp;

@@ -8,6 +8,8 @@ pub enum Engine {
     Claude,
     /// pi, `pi --mode rpc`.
     Pi,
+    /// Codex, `codex app-server`.
+    Codex,
 }
 
 impl Engine {
@@ -16,6 +18,7 @@ impl Engine {
         match self {
             Engine::Claude => "claude",
             Engine::Pi => "pi",
+            Engine::Codex => "codex",
         }
     }
 
@@ -24,6 +27,7 @@ impl Engine {
         match name {
             "claude" => Some(Engine::Claude),
             "pi" => Some(Engine::Pi),
+            "codex" => Some(Engine::Codex),
             _ => None,
         }
     }

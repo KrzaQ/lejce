@@ -107,6 +107,8 @@ pub struct Activity {
     pub error: Option<String>,
     /// The engine has finished the message and waits for the next one.
     pub(crate) ended: bool,
+    /// The model, for engines that report usage without it (Codex).
+    pub(crate) model: String,
 }
 
 impl Activity {
@@ -134,6 +136,7 @@ impl Activity {
             answer: None,
             error: None,
             ended: false,
+            model: String::new(),
         }
     }
 
@@ -155,6 +158,7 @@ impl Activity {
         match self.engine {
             Engine::Claude => self.claude(&event),
             Engine::Pi => self.pi(&event),
+            Engine::Codex => self.codex(&event),
         }
     }
 
@@ -480,6 +484,158 @@ impl Activity {
             _ => false,
         }
     }
+
+    /// The notifications of `codex app-server` (JSON-RPC). Requests from
+    /// the server and answers to Lejce's own requests go to codex::record.
+    fn codex(&mut self, e: &Value) -> bool {
+        let p = &e["params"];
+        match e["method"].as_str() {
+            Some("item/started") => self.codex_item(&p["item"], false),
+            Some("item/completed") => self.codex_item(&p["item"], true),
+            Some("item/agentMessage/delta") => {
+                self.output_chars += str(&p["delta"]).len();
+                true
+            }
+            Some("item/reasoning/summaryTextDelta") | Some("item/reasoning/textDelta") => {
+                self.think(str(&p["delta"]));
+                true
+            }
+            Some("item/reasoning/summaryPartAdded") => {
+                self.think("\n\n");
+                false
+            }
+            // After each model call: `last` is that call, `total` the thread.
+            Some("thread/tokenUsage/updated") => {
+                let usage = &p["tokenUsage"];
+                let last = &usage["last"];
+                let input = number(&last["inputTokens"]);
+                let cached = number(&last["cachedInputTokens"]);
+                let output = number(&last["outputTokens"]);
+                self.input += input;
+                self.output_done += output;
+                self.output_chars = 0;
+                self.context = number(&last["totalTokens"]).max(input + output);
+                self.window = usage["modelContextWindow"].as_u64().or(self.window);
+                self.calls.push(Call {
+                    role: "model",
+                    provider: "openai".into(),
+                    model: self.model.clone(),
+                    input: input.saturating_sub(cached),
+                    cache_read: cached,
+                    cache_write: number(&last["cacheWriteInputTokens"]),
+                    output,
+                    thinking: last["reasoningOutputTokens"].as_u64(),
+                    ..Default::default()
+                });
+                true
+            }
+            // The plan's windows; Lejce knows the five-hour and the week.
+            Some("account/rateLimits/updated") => {
+                let limits = &p["rateLimits"];
+                let found: Vec<Limit> = ["primary", "secondary"]
+                    .iter()
+                    .filter_map(|key| {
+                        let w = &limits[*key];
+                        let name = match w["windowDurationMins"].as_u64()? {
+                            300 => "5h",
+                            10080 => "7d",
+                            _ => return None,
+                        };
+                        Some(Limit {
+                            name,
+                            used: w["usedPercent"].as_f64()? / 100.0,
+                            resets_at: w["resetsAt"].as_i64()?,
+                        })
+                    })
+                    .collect();
+                if !found.is_empty() {
+                    self.limits = found;
+                }
+                true
+            }
+            // An error Codex will not retry ends the turn with it.
+            Some("error") if !p["willRetry"].as_bool().unwrap_or(false) => {
+                self.error = Some(str(&p["error"]["message"]).to_string());
+                true
+            }
+            Some("turn/completed") => {
+                let turn = &p["turn"];
+                match turn["status"].as_str() {
+                    Some("completed") => {}
+                    Some("interrupted") => self.error = Some("interrupted".into()),
+                    _ => {
+                        let message = turn["error"]["message"]
+                            .as_str()
+                            .unwrap_or("the turn failed");
+                        self.error = Some(message.to_string());
+                    }
+                }
+                self.ended = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// One item of a Codex turn: a message, a thought or a tool call.
+    fn codex_item(&mut self, item: &Value, done: bool) -> bool {
+        let id = str(&item["id"]);
+        let tool = match item["type"].as_str() {
+            Some("agentMessage") => {
+                // Commentary comes between tool calls; the final answer last.
+                if done && item["phase"] != "commentary" {
+                    self.answer = Some(str(&item["text"]).trim().to_string());
+                }
+                return false;
+            }
+            Some("reasoning") => {
+                if !done {
+                    self.thinking.clear();
+                }
+                return false;
+            }
+            Some("commandExecution") => {
+                Some(("shell", Value::String(str(&item["command"]).into())))
+            }
+            Some("mcpToolCall") => Some((str(&item["tool"]), item["arguments"].clone())),
+            Some("dynamicToolCall") => Some((str(&item["tool"]), item["arguments"].clone())),
+            Some("webSearch") => Some(("web_search", Value::String(str(&item["query"]).into()))),
+            Some("fileChange") => {
+                let paths: Vec<&str> = item["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|c| str(&c["path"]))
+                    .collect();
+                Some(("edit", Value::String(paths.join(", "))))
+            }
+            _ => None,
+        };
+        let Some((name, input)) = tool else {
+            return false;
+        };
+        if !done {
+            self.start_step(id, name);
+            let detail = match &input {
+                Value::String(s) => short(s, 70),
+                other => arguments(other),
+            };
+            if let Some(step) = self.step(id) {
+                step.detail = detail;
+            }
+            return true;
+        }
+        let failed = matches!(item["status"].as_str(), Some("failed") | Some("declined"));
+        let result = match item["type"].as_str() {
+            Some("commandExecution") => Value::String(str(&item["aggregatedOutput"]).into()),
+            Some("mcpToolCall") if !item["error"].is_null() => item["error"]["message"].clone(),
+            Some("mcpToolCall") => item["result"]["content"].clone(),
+            Some("dynamicToolCall") => item["contentItems"].clone(),
+            _ => Value::String(str(&item["status"]).into()),
+        };
+        self.finish_step(id, failed, &result);
+        true
+    }
 }
 
 /// The time now, in Unix seconds: what `Limit::pace` and `Limit::left`
@@ -656,6 +812,72 @@ mod tests {
         );
         assert_eq!(a.calls[1].thinking, None);
         assert_eq!(a.context, 519 + 42);
+    }
+
+    #[test]
+    fn codex_stream() {
+        let lines = [
+            r#"{"method":"item/started","params":{"item":{"type":"reasoning","id":"r1","summary":[],"content":[]}}}"#,
+            r#"{"method":"item/reasoning/summaryTextDelta","params":{"itemId":"r1","delta":"Touch it.","summaryIndex":0}}"#,
+            r#"{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"m1","text":"I'll run it.","phase":"commentary"}}}"#,
+            r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc 'touch /tmp/x'","status":"inProgress"}}}"#,
+            r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc 'touch /tmp/x'","status":"completed","aggregatedOutput":"","exitCode":0}}}"#,
+            r#"{"method":"item/started","params":{"item":{"type":"mcpToolCall","id":"t1","server":"tools","tool":"board_note","status":"inProgress","arguments":{"page":2}}}}"#,
+            r#"{"method":"item/completed","params":{"item":{"type":"mcpToolCall","id":"t1","server":"tools","tool":"board_note","status":"completed","arguments":{"page":2},"result":{"content":[{"type":"text","text":"lantern"}]},"error":null}}}"#,
+            r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"totalTokens":13380,"inputTokens":13326,"cachedInputTokens":11264,"cacheWriteInputTokens":0,"outputTokens":54,"reasoningOutputTokens":10},"last":{"totalTokens":13380,"inputTokens":13326,"cachedInputTokens":11264,"cacheWriteInputTokens":0,"outputTokens":54,"reasoningOutputTokens":10},"modelContextWindow":258400}}}"#,
+            r#"{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1795170578},"secondary":null}}}"#,
+            r#"{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"m2","text":"done","phase":"final_answer"}}}"#,
+            r#"{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed","error":null}}}"#,
+        ];
+        let mut a = Activity::new(Engine::Codex, &[]);
+        a.model = "gpt-test".into();
+        for line in lines {
+            a.line(line);
+        }
+        assert_eq!(a.thinking, "Touch it.");
+        let steps: Vec<_> = a
+            .steps
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.detail.as_str(),
+                    s.state,
+                    s.result.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("shell", "/bin/zsh -lc 'touch /tmp/x'", StepState::Done, ""),
+                ("board_note", "2", StepState::Done, "lantern"),
+            ]
+        );
+        assert_eq!(a.answer.as_deref(), Some("done"));
+        assert!(a.ended && a.error.is_none());
+        assert_eq!((a.input, a.output(), a.context), (13326, 54, 13380));
+        assert_eq!(a.window, Some(258400));
+        assert_eq!(a.limits[0].name, "7d");
+        let c = &a.calls[0];
+        assert_eq!(
+            (
+                c.model.as_str(),
+                c.input,
+                c.cache_read,
+                c.output,
+                c.thinking
+            ),
+            ("gpt-test", 2062, 11264, 54, Some(10))
+        );
+    }
+
+    #[test]
+    fn codex_failed_turn() {
+        let mut a = Activity::new(Engine::Codex, &[]);
+        a.line(r#"{"method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"quota"}}}}"#);
+        assert_eq!(a.error.as_deref(), Some("quota"));
+        assert!(a.ended);
     }
 
     #[test]
