@@ -327,6 +327,7 @@ mod tests {
             tools: Some(Tools {
                 builtin: vec!["bash".into()],
                 servers: vec![McpServer::stdio("tools", "server", vec!["--x".into()])],
+                permissions: Default::default(),
             }),
             files: files.clone(),
         };

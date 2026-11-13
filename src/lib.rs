@@ -24,6 +24,7 @@ pub use host::{Forward, Host};
 pub use mcp::{McpServer, Transport};
 pub use question::{Answer, Question};
 pub use run::{
-    cancel_all, new_session_id, run, Canceller, Conversation, Error, Outcome, Session, Setup, Tools,
+    cancel_all, new_session_id, run, Canceller, Conversation, Error, Outcome, Permissions, Session,
+    Setup, Tools,
 };
 pub use usage::Call;

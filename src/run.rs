@@ -27,6 +27,7 @@ pub struct Tools {
     pub builtin: Vec<String>,
     /// MCP servers, with all their tools.
     pub servers: Vec<McpServer>,
+    pub permissions: Permissions,
 }
 
 /// Which engine session a conversation uses. The program keeps the
@@ -41,6 +42,21 @@ pub enum Session {
     /// The session with this id, from an earlier process. If the engine
     /// no longer has it, the conversation ends with `Error::SessionGone`.
     Resume(String),
+}
+
+/// Who decides whether a tool call may run, when the engine's own rules
+/// (the user's allow and deny lists) do not settle it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Permissions {
+    /// The engine's classifier judges each call (Claude Code's "auto"
+    /// mode). Nobody is asked.
+    #[default]
+    Auto,
+    /// The user: each such call becomes a `Question` with no options for
+    /// the program's `ask`, and `Answer::Yes` lets it run. Claude Code
+    /// sends these over its own output (`--permission-prompt-tool stdio`),
+    /// so it works over SSH too. pi's extensions ask through `ask` anyway.
+    Ask,
 }
 
 /// How to start an engine for a conversation.
@@ -474,7 +490,11 @@ impl Conversation {
             let Some(Ok(line)) = self.output.next() else {
                 break;
             };
-            if engine == Engine::Pi && pi::record(&line, &mut self.input, activity, ask) {
+            let asked = match engine {
+                Engine::Claude => claude::record(&line, &mut self.input, activity, ask),
+                Engine::Pi => pi::record(&line, &mut self.input, activity, ask),
+            };
+            if asked {
                 progress(activity);
             }
             if activity.line(&line)
