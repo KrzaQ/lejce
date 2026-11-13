@@ -1,6 +1,6 @@
 //! A conversation from the terminal: each line of input is one message.
 //!
-//!   cargo run --example talk -- <claude|pi> <model> [options]
+//!   cargo run --example talk -- <claude|pi|codex> <model> [options]
 //!
 //!   --ssh <destination>  run the engine on another machine
 //!   --folder <path>      the engine's folder (its project)
@@ -75,6 +75,7 @@ fn main() {
     let builtin: Vec<String> = match (flag("--shell"), engine) {
         (false, _) => Vec::new(),
         (true, Engine::Pi) => vec!["bash".into()],
+        (true, Engine::Codex) => vec!["shell".into()],
         (true, _) => vec!["Bash".into()],
     };
     let permissions = if flag("--ask") {
