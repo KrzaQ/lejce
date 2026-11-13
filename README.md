@@ -1,7 +1,7 @@
 # Lejce
 
 Lejce ("reins" in Polish) is a Rust library that drives coding agents:
-Claude Code, pi, and later Codex. It starts an engine on this machine or in
+Claude Code, pi and Codex. It starts an engine on this machine or in
 a folder on another machine over SSH, sends it messages, gives it MCP
 servers, and turns its output into one stream of events.
 

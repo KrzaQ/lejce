@@ -8,8 +8,8 @@ Lejce runs coding agents for other programs. Two programs use it:
   and shows proofs step by step.
 
 Both need the same things: start an engine, send it messages, read what it
-does, answer its questions, and count tokens. Kuterlapa has this code now
-(`core/src/engines.rs`, `activity.rs`, part of `approvals.rs`). Lejce takes
+does, answer its questions, and count tokens. Kuterlapa had this code
+(`core/src/engines.rs`, `activity.rs`, part of `approvals.rs`). Lejce took
 it over, so that both programs share one copy.
 
 ## Engines
@@ -18,7 +18,7 @@ it over, so that both programs share one copy.
 | ----------- | -------------------------------------------------------------------------------- | -------------------------------- |
 | Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose`     | JSON lines in, JSON lines out    |
 | pi          | `pi --mode rpc`                                                                  | JSON-RPC style lines             |
-| Codex       | `codex exec --json` (later)                                                      | JSON lines out                   |
+| Codex       | `codex app-server`                                                               | JSON-RPC, both ways              |
 
 Every engine reports the same events to the program:
 
@@ -27,6 +27,10 @@ Every engine reports the same events to the program:
 - a question for the user (a permission prompt, or a choice);
 - token usage: input, cache read, cache write, output, cost;
 - the end of a turn, or an error.
+
+Codex runs as its app server, not `codex exec --json`: the app server keeps
+a thread across turns, streams the same items, and asks for approvals with
+requests of its own. `codex exec` would start a process per message.
 
 ## Hosts
 
@@ -90,13 +94,24 @@ such setting in Lejce: its extensions guard the tools, so they stay.
 
 ## Questions from the engine
 
-- Claude Code: `--permission-prompt-tool` sends permission prompts to an MCP
-  tool. Lejce turns the call into a question event.
+- Claude Code: with `--permission-prompt-tool stdio`, each permission prompt
+  comes as a control request (`can_use_tool`) on the engine's output, and
+  the answer goes back on its input. The plan was an MCP tool; the control
+  requests travel in the engine's own pipe instead, so they work over SSH
+  with no server and no forwarded port.
 - pi: `extension_ui_request` (select, confirm) from extensions such as a
   permission guard.
-- Codex: its approval requests.
+- Codex: its approval requests (`item/commandExecution/requestApproval`,
+  `item/fileChange/requestApproval`).
 
 The program shows the question and returns the answer through Lejce.
+
+`Tools::permissions` says who decides a tool call that the engine's own
+rules do not settle. `Permissions::Auto` lets the engine's classifier
+decide: Claude Code's `auto` mode, Codex's auto reviewer. `Permissions::Ask`
+asks the user: Claude Code's `default` mode with the prompts above, Codex's
+`untrusted` policy. The user's own allow rules still apply, so a call they
+already allow does not ask.
 
 ## Cancelling
 
@@ -116,5 +131,11 @@ the signals to that group over a new ssh connection.
 2. Done: long-lived conversations and explicit session ids (Lemat needs
    them; Kuterlapa sends one message per process).
 3. Done: SSH hosts with forwarded MCP servers.
-4. Permission prompts for Claude Code through an MCP tool.
-5. Codex.
+4. Done: permission prompts for Claude Code (through its control
+   requests, not an MCP tool).
+5. Done: Codex, through its app server.
+
+Not done yet: Codex threads cannot be named before they start, so
+`Conversation::session()` gives Codex's own id. Codex keeps the user's MCP
+servers from `~/.codex/config.toml` next to the program's, and Lejce cannot
+turn off Codex's hooks.
